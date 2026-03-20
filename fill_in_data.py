@@ -6,6 +6,10 @@ from sklearn.impute import SimpleImputer
 from sklearn.model_selection import cross_val_score
 from sklearn.svm import LinearSVC
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import classification_report
+import re
+
+#-------------------------------TRAIN-----------------------------------#
 
 df = pd.read_csv('train.csv')
 
@@ -26,51 +30,111 @@ class c:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
-# print(f"The dataset length: \t\t{c.BLUE}{len(new_df)}{c.END}")
-# print(f"Total number of missing values: {c.BOLD}{nan_total}{c.END}\n")
-# print(f"Total length: {length}")
-# print(f"{c.BOLD}Printing how many entries in each column contain no NaN values{c.END}:")
-# new_df.info()
-
 # Preprocessing
-new_df = df.drop(columns=['weight'])
+
+def map_icd9(code):
+    if pd.isnull(code) or code == '?' or code == 'None':
+        return 'Other'
+    
+    # Ibland innehåller koder bokstäver (V eller E), vi sätter dem som 'Other'
+    try:
+        # Om koden innehåller punkt (t.ex. 250.01), ta bara siffran före punkten
+        val = float(str(code).split('.')[0])
+    except ValueError:
+        return 'Other'
+
+    if 390 <= val <= 459 or val == 785:
+        return 'Circulatory'
+    elif 460 <= val <= 519 or val == 786:
+        return 'Respiratory'
+    elif 520 <= val <= 579 or val == 787:
+        return 'Digestive'
+    elif val == 250:
+        return 'Diabetes'
+    elif 800 <= val <= 999:
+        return 'Injury'
+    elif 710 <= val <= 739:
+        return 'Musculoskeletal'
+    elif 580 <= val <= 629 or val == 788:
+        return 'Genitourinary'
+    elif 140 <= val <= 239:
+        return 'Neoplasms'
+    else:
+        return 'Other'
+    
+#AC1
+def parse_a1c(val):
+    if pd.isna(val):
+        return np.nan
+    val = str(val).strip()
+    if val.lower() in ['none', '?']:
+        return np.nan
+    if val.lower() == 'norm':
+        return 5.5
+    try:
+        return float(val)
+    except ValueError:
+        pass
+    match = re.match(r'([<>])\s*(\d+\.?\d*)', val)
+    if match:
+        operator = match.group(1)
+        number = float(match.group(2))
+        if operator == '>':
+            return number + 0.3
+        elif operator == '<':
+            return number - 0.3
+    return np.nan
+
+
+new_df = df.drop(columns=['weight', 'payer_code', 'medical_specialty'])
+new_df = new_df.drop_duplicates(subset='patient_nbr', keep='first')
+#
+new_df['procs_per_day'] = new_df['num_lab_procedures'] / (new_df['time_in_hospital'] + 1)
+new_df['meds_per_day'] = new_df['num_medications'] / (new_df['time_in_hospital'] + 1)
+new_df['total_visits'] = new_df['number_outpatient'] + new_df['number_emergency'] + new_df['number_inpatient']
 new_df.replace('?', np.nan, inplace=True)
-imputer = SimpleImputer(strategy='most_frequent')
+new_df['A1Cresult'] = new_df['A1Cresult'].apply(parse_a1c) #A1C
 
-categorical_cols = new_df.select_dtypes(include=['object']).columns
+#patienter som dött eller flyttats till hospice
+expired_ids = [11, 13, 14, 19, 20, 21]
+new_df = new_df[~new_df['discharge_disposition_id'].isin(expired_ids)]
 
-for col in categorical_cols:
-    if new_df[col].isnull().sum() > 0:
-        most_frequent = new_df[col].mode()[0]
-        new_df[col] = new_df[col].fillna(most_frequent)
 
-remaining_nan_cat = new_df.isnull().sum().sum()
+change_to_string = ['admission_type_id', 'discharge_disposition_id', 'admission_source_id']
+for i in range(len(change_to_string)):
+    new_df[change_to_string[i]] = new_df[change_to_string[i]].astype(str)
 
-# print(f"Remaining number of missing values categorical: {new_df[categorical_cols].isnull().sum().sum()}")
-# print(f"Total number of missing values: {c.BOLD}{remaining_nan_cat}{c.END}\n")
-# new_df.info()
-
-age_range = {'[0-10]': 5, '[10-20]': 15, '[20-30]': 25, '[30-40]': 35, '[40-50]': 45, 
-             '[50-60]': 55, '[60-70]': 65, '[70-80]': 75, '[80-90]': 85, '[90-100]': 95}
+age_range = {'[0-10)': 5, '[10-20)': 15, '[20-30)': 25, '[30-40)': 35, '[40-50)': 45, 
+             '[50-60)': 55, '[60-70)': 65, '[70-80)': 75, '[80-90)': 85, '[90-100)': 95}
 new_df['age'] = new_df['age'].map(age_range)
 
 numerical_cols = new_df.select_dtypes(include=['number']).columns
 numerical_cols = numerical_cols.drop('age')
 
+numerical_frequent = {}
 for num in numerical_cols:
     if new_df[num].isnull().sum() > 0:
         median = new_df[num].mean()
+        numerical_frequent[num] = median
         new_df[num] = new_df[num].fillna(median)
 
-remaining_nan_num = new_df.isnull().sum().sum()
 
-# print(f"Remaining number of missing values numerical: {new_df[numerical_cols].isnull().sum().sum()}")
-# print(f"Total number of missing values: {c.BOLD}{remaining_nan_num}{c.END}\n")
-# new_df.info()
+diag_cols = ['diag_1', 'diag_2', 'diag_3']
+for col in diag_cols:
+    new_df[col] = new_df[col].apply(map_icd9)
+
+categorical_cols = new_df.select_dtypes(include=['object']).columns
+categorical_frequent = {}
+for col in categorical_cols:
+    if new_df[col].isnull().sum() > 0:
+        most_frequent = new_df[col].mode()[0]
+        categorical_frequent[col] = most_frequent
+        new_df[col] = new_df[col].fillna(most_frequent)
 
 # Divide dataset and split into training and test set
-X_unencoded = new_df.drop(columns=['readmitted', 'encounter_id','patient_nbr'], axis=1)
+X_unencoded = new_df.drop(columns=['readmitted', 'encounter_id','patient_nbr', 'id'], axis=1)
 y = new_df['readmitted']
+
 
 # Convert values from categorical to numerical if applicable 
 X = pd.get_dummies(X_unencoded, drop_first=True)
@@ -79,53 +143,75 @@ X = pd.get_dummies(X_unencoded, drop_first=True)
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
 
 # Train a classifier
-rand_forest_clf = RandomForestClassifier()
+rand_forest_clf = RandomForestClassifier(n_estimators=200, class_weight='balanced', max_depth=20)
 rand_forest_clf.fit(X_train, y_train)
+
+importances = rand_forest_clf.feature_importances_
+feat_importances = pd.Series(importances, index=X.columns)
+print(feat_importances.nlargest(10)) # Visar de 10 viktigaste kolumnerna
+
 log_pred = rand_forest_clf.predict(X_test)
 acc = rand_forest_clf.score(X_test, y_test)
 print(f"Accuracy train: {acc}")
 
-#----------------------------------------------------------#
-
+#-------------------------------TEST-----------------------------------#
 d_test = pd.read_csv('test.csv')
 
 new_df_test = d_test.copy()
 
-nan_values_per_feature = new_df_test.isnull().sum()
-nan_total = sum(list(new_df_test.isnull().sum()))
-length = len(df)
+# nan_values_per_feature = new_df_test.isnull().sum()
+# nan_total = sum(list(new_df_test.isnull().sum()))
+# length = len(df)
 
 # Preprocessing
-new_df_test = d_test.drop(columns=['weight'], columns=['payer_code'])
+new_df_test = d_test.drop(columns=['weight', 'payer_code', 'medical_specialty'])
+
+new_df_test['procs_per_day'] = new_df_test['num_lab_procedures'] / (new_df_test['time_in_hospital'] + 1)
+new_df_test['meds_per_day'] = new_df_test['num_medications'] / (new_df_test['time_in_hospital'] + 1)
+
+new_df_test['total_visits'] = new_df_test['number_outpatient'] + new_df_test['number_emergency'] + new_df_test['number_inpatient']
 new_df_test.replace('?', np.nan, inplace=True)
-imputer = SimpleImputer(strategy='most_frequent')
+new_df_test['A1Cresult'] = new_df_test['A1Cresult'].apply(parse_a1c) #A1c
 
-categorical_cols = new_df_test.select_dtypes(include=['object']).columns
+#new_df_test = new_df.drop_duplicates(subset='patient_nbr', keep='first')
 
-for col in categorical_cols:
-    if new_df_test[col].isnull().sum() > 0:
-        most_frequent = new_df_test[col].mode()[0]
-        new_df_test[col] = new_df_test[col].fillna(most_frequent)
+# NYTT
+for col in diag_cols:
+    new_df_test[col] = new_df_test[col].apply(map_icd9)
 
-remaining_nan_cat = new_df_test.isnull().sum().sum()
-
-age_range = {'[0-10]': 5, '[10-20]': 15, '[20-30]': 25, '[30-40]': 35, '[40-50]': 45, 
-             '[50-60]': 55, '[60-70]': 65, '[70-80]': 75, '[80-90]': 85, '[90-100]': 95}
 new_df_test['age'] = new_df_test['age'].map(age_range)
 
-numerical_cols = new_df_test.select_dtypes(include=['number']).columns
-numerical_cols = numerical_cols.drop('age')
+for i in range(len(change_to_string)):
+    new_df_test[change_to_string[i]] = new_df_test[change_to_string[i]].astype(str)
 
 for num in numerical_cols:
-    if new_df_test[num].isnull().sum() > 0:
-        median = new_df_test[num].mean()
-        new_df_test[num] = new_df_test[num].fillna(median)
+    if num == 'readmitted':
+        continue
+        
+    if num in numerical_frequent:
+        new_df_test[num] = new_df_test[num].fillna(numerical_frequent[num])
+    else:
+        # Fallback: if the column had no NaNs in train, use the mean of the column now
+        new_df_test[num] = new_df_test[num].fillna(new_df[num].mean())
 
-remaining_nan_num = new_df_test.isnull().sum().sum()
+for col in categorical_cols:
+    if col == 'readmitted':
+        continue
 
+    if col in categorical_frequent:
+        new_df_test[col] = new_df_test[col].fillna(categorical_frequent[col])
+    else:
+        # Fallback for columns that were clean in training but messy in test
+        new_df_test[col] = new_df_test[col].fillna(new_df[col].mode()[0])
+
+# 5. Prepare features for prediction
+# Drop IDs (but keep encounter_id or id elsewhere for the submission!)
+
+#kaggle
 # Divide dataset and split into training and test set
-X_unencoded_test_data = new_df_test.drop(columns=['encounter_id','patient_nbr'], axis=1)
+X_unencoded_test_data = new_df_test.drop(columns=['encounter_id','patient_nbr', 'id'], axis=1)
 # y_test_data = new_df_test['readmitted']
+
 
 # Convert values from categorical to numerical if applicable 
 X_test_data = pd.get_dummies(X_unencoded_test_data, drop_first=True)
@@ -146,3 +232,7 @@ submission = pd.DataFrame({
 
 submission.to_csv('submission.csv', index=False)
 print(f"{c.GREEN}✅ submission.csv created successfully!{c.END}")
+
+print(y.value_counts(normalize=True))  # Check class balance
+print(feat_importances.nlargest(15))   # See where A1C ranks
+print(classification_report(y_test, log_pred))
